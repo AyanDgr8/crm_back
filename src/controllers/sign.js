@@ -441,7 +441,7 @@ export const fetchCurrentUser = async (req, res) => {
         // Retrieve the user's information based on their ID
         const [users] = await connection.query(`
             SELECT u.id, u.username, u.email, r.role_name as role, u.team_id, t.team_name,
-                   u.role_id, u.requires_delete_approval, GROUP_CONCAT(p.permission_name) as permissions
+                   u.role_id, u.requires_delete_approval, u.company_id, GROUP_CONCAT(p.permission_name) as permissions
             FROM users u
             LEFT JOIN teams t ON u.team_id = t.id
             LEFT JOIN roles r ON u.role_id = r.id
@@ -467,9 +467,11 @@ export const fetchCurrentUser = async (req, res) => {
             role: user.role,
             team_id: user.team_id ? parseInt(user.team_id) : null,
             team_name: user.team_name,
+            company_id: user.company_id ? parseInt(user.company_id) : null,
             permissions: permissions,
             requires_delete_approval: user.requires_delete_approval === 1 || user.requires_delete_approval === true
         });
+
     } catch (error) {
         console.error('Error fetching current user:', error);
         return res.status(500).json({ message: 'Internal server error' });
