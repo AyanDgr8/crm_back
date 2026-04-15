@@ -57,7 +57,7 @@ import {
     getCompanyHierarchy
 } from '../controllers/companies.js';
 
-import { addCustomField, getCustomFields, deleteCustomField } from '../controllers/dynamicFields.js';
+import { addCustomField, getCustomFields, deleteCustomField, reorderCustomFields } from '../controllers/dynamicFields.js';
 import {
     createDepartment, getDepartments, updateDepartment, deleteDepartment,
     createSubDepartment, getSubDepartments, updateSubDepartment, deleteSubDepartment,
@@ -191,6 +191,7 @@ router.patch('/notifications/read-all', authenticateToken, markAllNotificationsR
 router.post('/custom-fields', authenticateToken, addCustomField);
 router.get('/custom-fields', authenticateToken, getCustomFields);
 router.delete('/custom-fields/:fieldName', authenticateToken, deleteCustomField);
+router.put('/custom-fields/reorder', authenticateToken, reorderCustomFields);
 
 // ============================================================================
 // DEPARTMENT ROUTES (IT Admin / Dept Admin)

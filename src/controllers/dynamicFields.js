@@ -264,6 +264,20 @@ export const getCustomFields = async (req, res) => {
         const pool = connectDB();
         connection = await pool.getConnection();
 
+        // Create field_order table if it doesn't exist
+        await connection.query(`
+            CREATE TABLE IF NOT EXISTS field_order (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                company_id INT NOT NULL,
+                field_name VARCHAR(255) NOT NULL,
+                display_order INT NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                UNIQUE KEY unique_company_field (company_id, field_name),
+                FOREIGN KEY (company_id) REFERENCES companies(id) ON DELETE CASCADE
+            )
+        `);
+
         // Get all columns from customers table
         const [columns] = await connection.query(
             `SELECT COLUMN_NAME, DATA_TYPE, COLUMN_TYPE, IS_NULLABLE, COLUMN_DEFAULT
@@ -273,9 +287,28 @@ export const getCustomFields = async (req, res) => {
              ORDER BY ORDINAL_POSITION`
         );
 
+        // Get display order for this company
+        const companyId = req.user.company_id;
+        const [orderData] = await connection.query(
+            `SELECT field_name, display_order FROM field_order WHERE company_id = ?`,
+            [companyId]
+        );
+
+        // Create a map of field orders
+        const orderMap = {};
+        orderData.forEach(row => {
+            orderMap[row.field_name] = row.display_order;
+        });
+
+        // Add display_order to columns
+        const columnsWithOrder = columns.map(col => ({
+            ...col,
+            DISPLAY_ORDER: orderMap[col.COLUMN_NAME] !== undefined ? orderMap[col.COLUMN_NAME] : 999
+        }));
+
         res.json({
             success: true,
-            fields: columns
+            fields: columnsWithOrder
         });
 
     } catch (error) {
@@ -283,6 +316,76 @@ export const getCustomFields = async (req, res) => {
         res.status(500).json({
             success: false,
             message: 'Failed to fetch custom fields',
+            error: error.message
+        });
+    } finally {
+        if (connection) {
+            connection.release();
+        }
+    }
+};
+
+/**
+ * Reorder custom fields
+ */
+export const reorderCustomFields = async (req, res) => {
+    let connection;
+
+    try {
+        // Only Business Head and Super Admin can reorder fields
+        if (!['business_head', 'super_admin'].includes(req.user.role)) {
+            return res.status(403).json({
+                success: false,
+                message: 'Permission denied'
+            });
+        }
+
+        const { fieldOrder } = req.body;
+
+        if (!Array.isArray(fieldOrder)) {
+            return res.status(400).json({
+                success: false,
+                message: 'fieldOrder must be an array'
+            });
+        }
+
+        const pool = connectDB();
+        connection = await pool.getConnection();
+        const companyId = req.user.company_id;
+
+        await connection.beginTransaction();
+
+        // Delete existing order for this company
+        await connection.query(
+            `DELETE FROM field_order WHERE company_id = ?`,
+            [companyId]
+        );
+
+        // Insert new order
+        for (const item of fieldOrder) {
+            await connection.query(
+                `INSERT INTO field_order (company_id, field_name, display_order) VALUES (?, ?, ?)`,
+                [companyId, item.fieldName, item.displayOrder]
+            );
+        }
+
+        await connection.commit();
+
+        logger.info(`Field order updated for company ${companyId} by user ${req.user.userId}`);
+
+        res.json({
+            success: true,
+            message: 'Field order updated successfully'
+        });
+
+    } catch (error) {
+        if (connection) {
+            await connection.rollback();
+        }
+        logger.error('Error reordering fields:', error);
+        res.status(500).json({
+            success: false,
+            message: 'Failed to reorder fields',
             error: error.message
         });
     } finally {

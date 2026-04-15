@@ -7,6 +7,31 @@ import { getEnumValues } from '../utils/enumHelper.js';
 
 const uploadDataStore = new Map();
 
+// Helper function to format dates for MySQL
+const formatDate = (dateValue) => {
+    if (!dateValue) return null;
+    try {
+        const date = new Date(dateValue);
+        if (isNaN(date.getTime())) return null;
+        // Format as MySQL DATETIME: YYYY-MM-DD HH:MM:SS
+        return date.toISOString().slice(0, 19).replace('T', ' ');
+    } catch (error) {
+        console.error('Error formatting date:', error);
+        return null;
+    }
+};
+
+// Helper function to validate enum values
+const validateEnumValue = (value, allowedValues) => {
+    if (!value) return null;
+    const stringValue = String(value).trim();
+    // Check if value is in allowed enum values (case-insensitive)
+    const isValid = allowedValues.some(allowed => 
+        String(allowed).toLowerCase() === stringValue.toLowerCase()
+    );
+    return isValid ? stringValue : null;
+};
+
 export const uploadCustomerData = async (req, res) => {
     try {
         const { headerMapping, customerData, distributionOptions } = req.body;

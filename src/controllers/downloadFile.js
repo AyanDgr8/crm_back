@@ -33,23 +33,24 @@ export const downloadCustomerData = async (req, res) => {
         const user = userResult[0];
         console.log('User role and team:', { role: user.role_name, team_id: user.team_id, username: user.username });
 
+        // Get all columns from customers table dynamically
+        const [columns] = await connection.query('SHOW COLUMNS FROM customers');
+        const systemFieldsToExclude = ['id', 'created_at', 'updated_at', 'company_id', 'team_id', 'duplicate_action', 'department_id', 'sub_department_id', 'assigned_to'];
+        const columnNames = columns
+            .map(col => col.Field)
+            .filter(name => !systemFieldsToExclude.includes(name))
+            .map(name => `c.${name}`)
+            .join(', ');
+
         let query = `
-            SELECT DISTINCT
-                c.first_name, c.last_name,
-                c.course, c.age_group,
-                c.profession, c.investment_trading, c.why_choose, 
-                c.language, c.education,c.region, c.designation, 
-                c.phone_no, c.whatsapp_num, c.email_id, c.yt_email_id,
-                c.mentor, c.gender,c.followup_count, c.disposition, 
-                c.agent_name, c.comment, c.C_unique_id,
-                c.date_created, c.last_updated,
-                c.scheduled_at
+            SELECT DISTINCT ${columnNames}
             FROM customers c
             INNER JOIN users agent_user ON c.agent_name = agent_user.username
             WHERE DATE(c.date_created) BETWEEN DATE(?) AND DATE(?)
+            AND c.company_id = ?
         `;
 
-        const params = [startDate, endDate];
+        const params = [startDate, endDate, user.company_id];
 
         // Apply role-based filters
         if (!['super_admin', 'it_admin', 'business_head'].includes(user.role_name)) {

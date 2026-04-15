@@ -235,7 +235,7 @@ export const makeNewRecord = async (req, res) => {
         // Define system/ignored fields that shouldn't be auto-mapped from body
         const ignoredFields = [
             'id', 'created_at', 'updated_at', 'last_updated',
-            'company_id', 'C_unique_id', // Handled explicitly
+            'company_id', 'C_unique_id', 'scheduled_at', // Handled explicitly
             ...Object.keys(validatedData) // Already validated standard fields
         ];
 
@@ -381,12 +381,17 @@ const handleDuplicate = async (connection, customerData, existingRecord, action)
             // Get column names for update
             const [columns] = await connection.query('SHOW COLUMNS FROM customers');
             const columnNames = columns.map(col => col.Field)
-                .filter(name => !['id', 'C_unique_id', 'date_created', 'last_updated', 'scheduled_at'].includes(name));
+                .filter(name => !['id', 'C_unique_id', 'date_created', 'last_updated'].includes(name));
 
             const updateQuery = `UPDATE customers SET ${columnNames.map(col => `${col} = ?`).join(', ')
                 }, last_updated = NOW() WHERE id = ?`;
 
+            const datetimeFields = ['scheduled_at', 'next_follow_up', 'call_date_time', 'admission_date', 'discharge_date', 'followup_date'];
             const values = columnNames.map(colName => {
+                // Format datetime fields to MySQL format
+                if (datetimeFields.includes(colName) && customerData[colName]) {
+                    return formatMySQLDateTime(customerData[colName]);
+                }
                 return customerData[colName] || null;
             });
 
@@ -518,7 +523,13 @@ export const createCustomer = async (req, res) => {
         dbColumnNames.forEach(col => {
             if (!ignoredFields.includes(col) && col !== 'company_id' && col !== 'C_unique_id') {
                 if (customerData[col] !== undefined) {
-                    insertData[col] = customerData[col] || null;
+                    // Format datetime fields to MySQL format
+                    const datetimeFields = ['scheduled_at', 'next_follow_up', 'call_date_time', 'admission_date', 'discharge_date', 'followup_date'];
+                    if (datetimeFields.includes(col) && customerData[col]) {
+                        insertData[col] = formatMySQLDateTime(customerData[col]);
+                    } else {
+                        insertData[col] = customerData[col] || null;
+                    }
                 } else {
                     // Set default for agent_name if not provided
                     if (col === 'agent_name') {
