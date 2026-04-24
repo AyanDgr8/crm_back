@@ -65,7 +65,7 @@ export const addCustomField = async (req, res) => {
         }
 
         // Validate field type
-        const allowedTypes = ['VARCHAR', 'INT', 'DECIMAL', 'DATETIME', 'DATE', 'TEXT', 'ENUM'];
+        const allowedTypes = ['VARCHAR', 'INT', 'DECIMAL', 'DATETIME', 'DATE', 'TEXT', 'ENUM', 'SET'];
         if (!allowedTypes.includes(fieldType)) {
             return res.status(400).json({
                 success: false,
@@ -144,6 +144,28 @@ export const addCustomField = async (req, res) => {
 
                 columnDefinition = `ENUM(${sanitizedEnumValues.join(',')})`;
                 break;
+
+            case 'SET':
+                if (!enumValues || !Array.isArray(enumValues) || enumValues.length === 0) {
+                    return res.status(400).json({
+                        success: false,
+                        message: 'SET type requires at least one value'
+                    });
+                }
+                const sanitizedSetValues = enumValues
+                    .map(v => String(v).trim())
+                    .filter(v => v.length > 0)
+                    .map(v => connection.escape(v));
+
+                if (sanitizedSetValues.length === 0) {
+                    return res.status(400).json({
+                        success: false,
+                        message: 'SET type requires valid values'
+                    });
+                }
+
+                columnDefinition = `SET(${sanitizedSetValues.join(',')})`;
+                break;
         }
 
         // Add NULL/NOT NULL constraint
@@ -151,7 +173,7 @@ export const addCustomField = async (req, res) => {
 
         // Add default value if provided
         if (defaultValue && defaultValue.trim() !== '') {
-            if (fieldType === 'VARCHAR' || fieldType === 'TEXT' || fieldType === 'ENUM') {
+            if (fieldType === 'VARCHAR' || fieldType === 'TEXT' || fieldType === 'ENUM' || fieldType === 'SET') {
                 columnDefinition += ` DEFAULT ${connection.escape(defaultValue)}`;
             } else if (fieldType === 'INT' || fieldType === 'DECIMAL') {
                 const numValue = parseFloat(defaultValue);
