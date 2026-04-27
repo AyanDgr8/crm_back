@@ -76,23 +76,6 @@ export const addCustomField = async (req, res) => {
         const pool = connectDB();
         connection = await pool.getConnection();
 
-        // Check if field already exists
-        const [existingColumns] = await connection.query(
-            `SELECT COLUMN_NAME 
-             FROM INFORMATION_SCHEMA.COLUMNS 
-             WHERE TABLE_SCHEMA = DATABASE() 
-             AND TABLE_NAME = 'customers' 
-             AND COLUMN_NAME = ?`,
-            [sanitizedFieldName]
-        );
-
-        if (existingColumns.length > 0) {
-            return res.status(400).json({
-                success: false,
-                message: `Field "${sanitizedFieldName}" already exists`
-            });
-        }
-
         // Build column definition
         let columnDefinition = '';
 
@@ -187,20 +170,77 @@ export const addCustomField = async (req, res) => {
             }
         }
 
-        // Execute ALTER TABLE query
-        const alterQuery = `ALTER TABLE customers ADD COLUMN ${sanitizedFieldName} ${columnDefinition}`;
+        // Check if field already exists in custom_fields_metadata for this company
+        const [existingMetadata] = await connection.query(
+            `SELECT id FROM custom_fields_metadata 
+             WHERE company_id = ? AND field_name = ?`,
+            [req.user.company_id, sanitizedFieldName]
+        );
 
-        logger.info(`Executing: ${alterQuery}`);
-        await connection.query(alterQuery);
+        if (existingMetadata.length > 0) {
+            return res.status(400).json({
+                success: false,
+                message: `Field "${sanitizedFieldName}" already exists for your company`
+            });
+        }
 
-        logger.info(`Custom field "${sanitizedFieldName}" added successfully by user ${req.user.userId}`);
+        await connection.beginTransaction();
 
-        res.json({
-            success: true,
-            message: `Field "${sanitizedFieldName}" added successfully`,
-            fieldName: sanitizedFieldName,
-            fieldType: fieldType
-        });
+        try {
+            // Only add column to customers table if it doesn't exist globally
+            const [globalColumn] = await connection.query(
+                `SELECT COLUMN_NAME 
+                 FROM INFORMATION_SCHEMA.COLUMNS 
+                 WHERE TABLE_SCHEMA = DATABASE() 
+                 AND TABLE_NAME = 'customers' 
+                 AND COLUMN_NAME = ?`,
+                [sanitizedFieldName]
+            );
+
+            if (globalColumn.length === 0) {
+                // Column doesn't exist, add it to customers table
+                const alterQuery = `ALTER TABLE customers ADD COLUMN ${sanitizedFieldName} ${columnDefinition}`;
+                logger.info(`Executing: ${alterQuery}`);
+                await connection.query(alterQuery);
+            }
+
+            // Store field metadata for this company
+            const enumValuesJson = (fieldType === 'ENUM' || fieldType === 'SET') && enumValues 
+                ? JSON.stringify(enumValues) 
+                : null;
+
+            await connection.query(
+                `INSERT INTO custom_fields_metadata 
+                 (company_id, field_name, field_label, field_type, field_length, enum_values, 
+                  default_value, is_required, is_system_field, created_by) 
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, false, ?)`,
+                [
+                    req.user.company_id,
+                    sanitizedFieldName,
+                    fieldName.trim(), // Original field name as label
+                    fieldType,
+                    fieldLength || null,
+                    enumValuesJson,
+                    defaultValue || null,
+                    isRequired || false,
+                    req.user.userId
+                ]
+            );
+
+            await connection.commit();
+
+            logger.info(`Custom field "${sanitizedFieldName}" added successfully for company ${req.user.company_id} by user ${req.user.userId}`);
+
+            res.json({
+                success: true,
+                message: `Field "${sanitizedFieldName}" added successfully`,
+                fieldName: sanitizedFieldName,
+                fieldType: fieldType
+            });
+        } catch (error) {
+            await connection.rollback();
+            throw error;
+        }
 
     } catch (error) {
         logger.error('Error adding custom field:', error);
@@ -229,44 +269,59 @@ export const deleteCustomField = async (req, res) => {
 
         const { fieldName } = req.params;
 
-        // Prevent deleting standard system fields
-        const standardFields = [
-            'id', 'created_at', 'updated_at', 'last_updated',
-            'first_name', 'last_name', 'company_name', 'phone_no', 'email_id',
-            'address', 'lead_source', 'call_date_time', 'call_status',
-            'call_outcome', 'call_recording', 'product', 'budget',
-            'decision_making', 'decision_time', 'lead_stage', 'next_follow_up',
-            'assigned_agent', 'reminder_notes', 'priority_level', 'customer_category',
-            'tags_labels', 'communcation_channel', 'deal_value', 'conversion_status',
-            'customer_history', 'comment', 'agent_name', 'company_id', 'team_id', 'C_unique_id'
+        // Prevent deleting core system fields and database-managed columns
+        const protectedFields = [
+            'id', 'company_id', 'C_unique_id', 'created_at', 'date_created', 
+            'updated_at', 'last_updated', 'team_id', 'department_id', 
+            'sub_department_id', 'assigned_to'
         ];
 
-        if (standardFields.includes(fieldName)) {
-            return res.status(400).json({ success: false, message: 'Cannot delete system fields' });
+        if (protectedFields.includes(fieldName)) {
+            return res.status(400).json({ 
+                success: false, 
+                message: 'Cannot delete system-managed fields' 
+            });
         }
 
         const pool = connectDB();
         connection = await pool.getConnection();
 
-        // Check if field exists
+        // Check if field exists for this company
         const [existing] = await connection.query(
-            `SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS 
-             WHERE TABLE_SCHEMA = DATABASE() 
-             AND TABLE_NAME = 'customers' 
-             AND COLUMN_NAME = ?`,
-            [fieldName]
+            `SELECT id, is_system_field FROM custom_fields_metadata 
+             WHERE company_id = ? AND field_name = ? AND is_active = true`,
+            [req.user.company_id, fieldName]
         );
 
         if (existing.length === 0) {
-            return res.status(404).json({ success: false, message: 'Field not found' });
+            return res.status(404).json({ 
+                success: false, 
+                message: 'Field not found for your company' 
+            });
         }
 
-        // Drop the column
-        await connection.query(`ALTER TABLE customers DROP COLUMN ${fieldName}`);
+        if (existing[0].is_system_field) {
+            return res.status(400).json({ 
+                success: false, 
+                message: 'Cannot delete system fields' 
+            });
+        }
 
-        logger.info(`Custom field "${fieldName}" deleted by user ${req.user.userId}`);
+        // Soft delete - mark as inactive instead of dropping column
+        // This way other companies can still use the same column name
+        await connection.query(
+            `UPDATE custom_fields_metadata 
+             SET is_active = false 
+             WHERE company_id = ? AND field_name = ?`,
+            [req.user.company_id, fieldName]
+        );
 
-        res.json({ success: true, message: `Field "${fieldName}" deleted successfully` });
+        logger.info(`Custom field "${fieldName}" deleted for company ${req.user.company_id} by user ${req.user.userId}`);
+
+        res.json({ 
+            success: true, 
+            message: `Field "${fieldName}" deleted successfully` 
+        });
 
     } catch (error) {
         logger.error('Error deleting custom field:', error);
@@ -300,37 +355,52 @@ export const getCustomFields = async (req, res) => {
             )
         `);
 
-        // Get all columns from customers table
-        const [columns] = await connection.query(
-            `SELECT COLUMN_NAME, DATA_TYPE, COLUMN_TYPE, IS_NULLABLE, COLUMN_DEFAULT
-             FROM INFORMATION_SCHEMA.COLUMNS 
-             WHERE TABLE_SCHEMA = DATABASE() 
-             AND TABLE_NAME = 'customers'
-             ORDER BY ORDINAL_POSITION`
-        );
-
-        // Get display order for this company
         const companyId = req.user.company_id;
-        const [orderData] = await connection.query(
-            `SELECT field_name, display_order FROM field_order WHERE company_id = ?`,
+
+        // Get fields from custom_fields_metadata for this company only
+        const [companyFields] = await connection.query(
+            `SELECT 
+                cfm.field_name,
+                cfm.field_label,
+                cfm.field_type,
+                cfm.field_length,
+                cfm.enum_values,
+                cfm.default_value,
+                cfm.is_required,
+                cfm.is_system_field,
+                cfm.display_order,
+                cfm.is_active,
+                c.COLUMN_TYPE,
+                c.IS_NULLABLE,
+                c.COLUMN_DEFAULT
+             FROM custom_fields_metadata cfm
+             LEFT JOIN INFORMATION_SCHEMA.COLUMNS c 
+                ON c.TABLE_SCHEMA = DATABASE() 
+                AND c.TABLE_NAME = 'customers' 
+                AND c.COLUMN_NAME = cfm.field_name
+             WHERE cfm.company_id = ? 
+             AND cfm.is_active = true
+             ORDER BY cfm.display_order, cfm.field_name`,
             [companyId]
         );
 
-        // Create a map of field orders
-        const orderMap = {};
-        orderData.forEach(row => {
-            orderMap[row.field_name] = row.display_order;
-        });
-
-        // Add display_order to columns
-        const columnsWithOrder = columns.map(col => ({
-            ...col,
-            DISPLAY_ORDER: orderMap[col.COLUMN_NAME] !== undefined ? orderMap[col.COLUMN_NAME] : 999
+        // Format fields for frontend
+        const formattedFields = companyFields.map(field => ({
+            COLUMN_NAME: field.field_name,
+            FIELD_LABEL: field.field_label,
+            DATA_TYPE: field.field_type,
+            COLUMN_TYPE: field.COLUMN_TYPE || field.field_type,
+            IS_NULLABLE: field.is_required ? 'NO' : 'YES',
+            COLUMN_DEFAULT: field.default_value || field.COLUMN_DEFAULT,
+            IS_REQUIRED: field.is_required,
+            IS_SYSTEM_FIELD: field.is_system_field,
+            DISPLAY_ORDER: field.display_order,
+            ENUM_VALUES: field.enum_values ? JSON.parse(field.enum_values) : null
         }));
 
         res.json({
             success: true,
-            fields: columnsWithOrder
+            fields: formattedFields
         });
 
     } catch (error) {

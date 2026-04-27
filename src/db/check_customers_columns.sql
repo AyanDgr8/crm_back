@@ -1,0 +1,14 @@
+-- Check what columns exist in the customers table
+USE knowledgeBase_multitenant;
+
+SELECT 
+    COLUMN_NAME,
+    DATA_TYPE,
+    COLUMN_TYPE,
+    IS_NULLABLE,
+    COLUMN_DEFAULT,
+    COLUMN_COMMENT
+FROM INFORMATION_SCHEMA.COLUMNS 
+WHERE TABLE_SCHEMA = DATABASE() 
+AND TABLE_NAME = 'customers'
+ORDER BY ORDINAL_POSITION;
