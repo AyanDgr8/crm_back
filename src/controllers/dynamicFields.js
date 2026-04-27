@@ -309,6 +309,26 @@ export const getCustomFields = async (req, res) => {
              ORDER BY ORDINAL_POSITION`
         );
 
+        // Define standard system fields that shouldn't be treated as custom fields
+        const standardFields = [
+            'id', 'created_at', 'updated_at', 'last_updated', 'date_created',
+            'first_name', 'last_name', 'company_name', 'phone_no', 'email_id', 'email',
+            'address', 'lead_source', 'call_date_time', 'call_status',
+            'call_outcome', 'call_recording', 'product', 'budget',
+            'decision_making', 'decision_time', 'lead_stage', 'next_follow_up',
+            'assigned_agent', 'reminder_notes', 'priority_level', 'customer_category',
+            'tags_labels', 'communcation_channel', 'deal_value', 'conversion_status',
+            'customer_history', 'comment', 'agent_name', 'company_id', 'team_id', 'C_unique_id',
+            'assigned_to', 'scheduled_at', 'department_id', 'sub_department_id',
+            'gender', 'whatsapp_number', 'country', 'state', 'interest', 'customer_interest'
+        ];
+
+        // Add IS_SYSTEM_FIELD flag to each column
+        const processedColumns = columns.map(col => ({
+            ...col,
+            IS_SYSTEM_FIELD: standardFields.includes(col.COLUMN_NAME) ? 1 : 0
+        }));
+
         // Get display order for this company
         const companyId = req.user.company_id;
         const [orderData] = await connection.query(
@@ -323,7 +343,7 @@ export const getCustomFields = async (req, res) => {
         });
 
         // Add display_order to columns
-        const columnsWithOrder = columns.map(col => ({
+        const columnsWithOrder = processedColumns.map(col => ({
             ...col,
             DISPLAY_ORDER: orderMap[col.COLUMN_NAME] !== undefined ? orderMap[col.COLUMN_NAME] : 999
         }));
