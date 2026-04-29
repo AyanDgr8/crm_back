@@ -64,6 +64,11 @@ import {
     assignAdminToDepartment, removeAdminFromDepartment, getAdminDepartmentAssignments
 } from '../controllers/departments.js';
 
+// Account key & tenant-scoped data imports
+import { generateAccountKey, getAccountKey } from '../controllers/accountController.js';
+import { createData, getAllData, getDataById } from '../controllers/dataController.js';
+import { resolveTenant } from '../middlewares/tenantMiddleware.js';
+
 
 const router = express.Router();
 
@@ -254,5 +259,18 @@ router.post('/email/templates',          authenticateToken, createEmailTemplate)
 router.put('/email/templates/:id',       authenticateToken, updateEmailTemplate);
 router.delete('/email/templates/:id',    authenticateToken, deleteEmailTemplate);
 router.get('/email/logs/:customerId',    authenticateToken, getEmailLogs);
+
+// ============================================================================
+// ACCOUNT KEY ROUTES (X-Account-ID management)
+// ============================================================================
+router.post('/api/account/generate', generateAccountKey);
+router.get('/api/account/:company_id', getAccountKey);
+
+// ============================================================================
+// TENANT-SCOPED DATA ROUTES (requires X-Account-ID header)
+// ============================================================================
+router.post('/api/data', resolveTenant, createData);
+router.get('/api/data', resolveTenant, getAllData);
+router.get('/api/data/:id', resolveTenant, getDataById);
 
 export default router;
