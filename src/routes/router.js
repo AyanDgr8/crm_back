@@ -57,7 +57,7 @@ import {
     getCompanyHierarchy
 } from '../controllers/companies.js';
 
-import { addCustomField, getCustomFields, deleteCustomField, reorderCustomFields } from '../controllers/dynamicFields.js';
+import { addCustomField, getCustomFields, deleteCustomField, reorderCustomFields, editCustomField } from '../controllers/dynamicFields.js';
 import {
     createDepartment, getDepartments, updateDepartment, deleteDepartment,
     createSubDepartment, getSubDepartments, updateSubDepartment, deleteSubDepartment,
@@ -68,6 +68,9 @@ const router = express.Router();
 
 // Mount team routes
 router.use('/', teamRoutes);
+
+
+
 
 // ============================================================================
 // SUPER ADMIN ROUTES - Company Management
@@ -190,8 +193,9 @@ router.patch('/notifications/read-all', authenticateToken, markAllNotificationsR
 // Dynamic fields routes (IT Admin only)
 router.post('/custom-fields', authenticateToken, addCustomField);
 router.get('/custom-fields', authenticateToken, getCustomFields);
-router.delete('/custom-fields/:fieldName', authenticateToken, deleteCustomField);
 router.put('/custom-fields/reorder', authenticateToken, reorderCustomFields);
+router.put('/custom-fields/:fieldName', authenticateToken, editCustomField);
+router.delete('/custom-fields/:fieldName', authenticateToken, deleteCustomField);
 
 // ============================================================================
 // DEPARTMENT ROUTES (IT Admin / Dept Admin)
@@ -216,5 +220,44 @@ router.get('/admin-departments', authenticateToken, getAdminDepartmentAssignment
 import { getDistributionRules, saveDistributionRules } from '../controllers/distributionController.js';
 router.get('/distribution-rules/:departmentId', authenticateToken, getDistributionRules);
 router.post('/distribution-rules', authenticateToken, saveDistributionRules);
+
+import multer from 'multer';
+import path from 'path';
+import fs from 'fs';
+
+const storage = multer.diskStorage({
+    destination: (req, file, cb) => {
+        const dir = 'uploads/email_attachments';
+        if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+        cb(null, dir);
+    },
+    filename: (req, file, cb) => {
+        cb(null, Date.now() + '-' + file.originalname);
+    }
+});
+const upload = multer({ storage: storage });
+
+import { 
+    sendEmailToCustomer, 
+    getEmailTemplates, 
+    createEmailTemplate, 
+    updateEmailTemplate, 
+    deleteEmailTemplate, 
+    getEmailLogs,
+    getEmailVariables,
+    uploadEmailAttachment 
+} from '../controllers/emailController.js';
+
+// ============================================================================
+// EMAIL ROUTES
+// ============================================================================
+router.post('/email/send',               authenticateToken, upload.array('attachments'), sendEmailToCustomer);
+router.post('/email/upload-attachment',  authenticateToken, upload.array('attachments'), uploadEmailAttachment);
+router.get('/email/variables',           authenticateToken, getEmailVariables);
+router.get('/email/templates',           authenticateToken, getEmailTemplates);
+router.post('/email/templates',          authenticateToken, createEmailTemplate);
+router.put('/email/templates/:id',       authenticateToken, updateEmailTemplate);
+router.delete('/email/templates/:id',    authenticateToken, deleteEmailTemplate);
+router.get('/email/logs/:customerId',    authenticateToken, getEmailLogs);
 
 export default router;

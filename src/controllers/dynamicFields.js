@@ -23,7 +23,10 @@ export const addCustomField = async (req, res) => {
             fieldLength,
             enumValues,
             defaultValue,
-            isRequired
+            isRequired,
+            isEditable,
+            showInList,
+            isSearchable
         } = req.body;
 
         // Validate field name
@@ -82,7 +85,12 @@ export const addCustomField = async (req, res) => {
         switch (fieldType) {
             case 'VARCHAR':
                 const length = fieldLength && parseInt(fieldLength) > 0 ? parseInt(fieldLength) : 255;
-                columnDefinition = `VARCHAR(${Math.min(length, 65535)})`;
+                // Use TEXT for large fields to avoid row size limit (max VARCHAR is 300)
+                if (length > 300) {
+                    columnDefinition = 'TEXT';
+                } else {
+                    columnDefinition = `VARCHAR(${length})`;
+                }
                 break;
 
             case 'INT':
@@ -172,12 +180,12 @@ export const addCustomField = async (req, res) => {
 
         // Check if field already exists in custom_fields_metadata for this company
         const [existingMetadata] = await connection.query(
-            `SELECT id FROM custom_fields_metadata 
+            `SELECT id, is_active FROM custom_fields_metadata 
              WHERE company_id = ? AND field_name = ?`,
             [req.user.company_id, sanitizedFieldName]
         );
 
-        if (existingMetadata.length > 0) {
+        if (existingMetadata.length > 0 && existingMetadata[0].is_active) {
             return res.status(400).json({
                 success: false,
                 message: `Field "${sanitizedFieldName}" already exists for your company`
@@ -209,23 +217,52 @@ export const addCustomField = async (req, res) => {
                 ? JSON.stringify(enumValues) 
                 : null;
 
-            await connection.query(
-                `INSERT INTO custom_fields_metadata 
-                 (company_id, field_name, field_label, field_type, field_length, enum_values, 
-                  default_value, is_required, is_system_field, created_by) 
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, false, ?)`,
-                [
-                    req.user.company_id,
-                    sanitizedFieldName,
-                    fieldName.trim(), // Original field name as label
-                    fieldType,
-                    fieldLength || null,
-                    enumValuesJson,
-                    defaultValue || null,
-                    isRequired || false,
-                    req.user.userId
-                ]
-            );
+            // If inactive field exists, reactivate it; otherwise insert new
+            if (existingMetadata.length > 0 && !existingMetadata[0].is_active) {
+                // Reactivate the existing field
+                await connection.query(
+                    `UPDATE custom_fields_metadata 
+                     SET field_label = ?, field_type = ?, field_length = ?, enum_values = ?, 
+                         default_value = ?, is_required = ?, is_editable = ?, show_in_list = ?, is_searchable = ?, is_active = true, 
+                         created_by = ?, updated_at = CURRENT_TIMESTAMP
+                     WHERE id = ?`,
+                    [
+                        fieldName.trim(),
+                        fieldType,
+                        fieldLength || null,
+                        enumValuesJson,
+                        defaultValue || null,
+                        isRequired || false,
+                        isEditable !== false,
+                        showInList || false,
+                        isSearchable || false,
+                        req.user.userId,
+                        existingMetadata[0].id
+                    ]
+                );
+            } else {
+                // Insert new field
+                await connection.query(
+                    `INSERT INTO custom_fields_metadata 
+                     (company_id, field_name, field_label, field_type, field_length, enum_values, 
+                      default_value, is_required, is_editable, show_in_list, is_searchable, is_system_field, created_by) 
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, false, ?)`,
+                    [
+                        req.user.company_id,
+                        sanitizedFieldName,
+                        fieldName.trim(),
+                        fieldType,
+                        fieldLength || null,
+                        enumValuesJson,
+                        defaultValue || null,
+                        isRequired || false,
+                        isEditable !== false,
+                        showInList || false,
+                        isSearchable || false,
+                        req.user.userId
+                    ]
+                );
+            }
 
             await connection.commit();
 
@@ -307,16 +344,15 @@ export const deleteCustomField = async (req, res) => {
             });
         }
 
-        // Soft delete - mark as inactive instead of dropping column
-        // This way other companies can still use the same column name
+        // Hard delete - permanently remove from custom_fields_metadata
+        // Note: The column in customers table remains (other companies might use it)
         await connection.query(
-            `UPDATE custom_fields_metadata 
-             SET is_active = false 
+            `DELETE FROM custom_fields_metadata 
              WHERE company_id = ? AND field_name = ?`,
             [req.user.company_id, fieldName]
         );
 
-        logger.info(`Custom field "${fieldName}" deleted for company ${req.user.company_id} by user ${req.user.userId}`);
+        logger.info(`Custom field "${fieldName}" permanently deleted for company ${req.user.company_id} by user ${req.user.userId}`);
 
         res.json({ 
             success: true, 
@@ -356,6 +392,7 @@ export const getCustomFields = async (req, res) => {
         `);
 
         const companyId = req.user.company_id;
+        logger.info(`Fetching custom fields for company_id: ${companyId}`);
 
         // Get fields from custom_fields_metadata for this company only
         const [companyFields] = await connection.query(
@@ -367,6 +404,9 @@ export const getCustomFields = async (req, res) => {
                 cfm.enum_values,
                 cfm.default_value,
                 cfm.is_required,
+                cfm.is_editable,
+                cfm.show_in_list,
+                cfm.is_searchable,
                 cfm.is_system_field,
                 cfm.display_order,
                 cfm.is_active,
@@ -384,19 +424,47 @@ export const getCustomFields = async (req, res) => {
             [companyId]
         );
 
+        logger.info(`Found ${companyFields.length} fields for company ${companyId}`);
+
         // Format fields for frontend
-        const formattedFields = companyFields.map(field => ({
-            COLUMN_NAME: field.field_name,
-            FIELD_LABEL: field.field_label,
-            DATA_TYPE: field.field_type,
-            COLUMN_TYPE: field.COLUMN_TYPE || field.field_type,
-            IS_NULLABLE: field.is_required ? 'NO' : 'YES',
-            COLUMN_DEFAULT: field.default_value || field.COLUMN_DEFAULT,
-            IS_REQUIRED: field.is_required,
-            IS_SYSTEM_FIELD: field.is_system_field,
-            DISPLAY_ORDER: field.display_order,
-            ENUM_VALUES: field.enum_values ? JSON.parse(field.enum_values) : null
-        }));
+        const formattedFields = companyFields.map(field => {
+            let enumValues = null;
+            
+            // First try to get from metadata
+            if (field.enum_values) {
+                try {
+                    enumValues = JSON.parse(field.enum_values);
+                } catch (err) {
+                    logger.error(`Failed to parse enum_values for field ${field.field_name}:`, err);
+                    enumValues = null;
+                }
+            }
+            
+            // If not in metadata, parse from COLUMN_TYPE for ENUM/SET fields
+            if (!enumValues && field.COLUMN_TYPE && (field.field_type === 'ENUM' || field.field_type === 'SET')) {
+                const match = field.COLUMN_TYPE.match(/'([^']+)'/g);
+                if (match) {
+                    enumValues = match.map(s => s.replace(/'/g, ''));
+                }
+            }
+            
+            return {
+                COLUMN_NAME: field.field_name,
+                FIELD_LABEL: field.field_label,
+                DATA_TYPE: field.field_type,
+                FIELD_LENGTH: field.field_length,
+                COLUMN_TYPE: field.COLUMN_TYPE || field.field_type,
+                IS_NULLABLE: field.is_required ? 'NO' : 'YES',
+                COLUMN_DEFAULT: field.default_value || field.COLUMN_DEFAULT,
+                IS_REQUIRED: Boolean(field.is_required),
+                IS_EDITABLE: Boolean(field.is_editable),
+                SHOW_IN_LIST: Boolean(field.show_in_list),
+                IS_SEARCHABLE: Boolean(field.is_searchable),
+                IS_SYSTEM_FIELD: Boolean(field.is_system_field),
+                DISPLAY_ORDER: field.display_order,
+                ENUM_VALUES: enumValues
+            };
+        });
 
         res.json({
             success: true,
@@ -447,17 +515,13 @@ export const reorderCustomFields = async (req, res) => {
 
         await connection.beginTransaction();
 
-        // Delete existing order for this company
-        await connection.query(
-            `DELETE FROM field_order WHERE company_id = ?`,
-            [companyId]
-        );
-
-        // Insert new order
+        // Update display_order in custom_fields_metadata for each field
         for (const item of fieldOrder) {
             await connection.query(
-                `INSERT INTO field_order (company_id, field_name, display_order) VALUES (?, ?, ?)`,
-                [companyId, item.fieldName, item.displayOrder]
+                `UPDATE custom_fields_metadata 
+                 SET display_order = ? 
+                 WHERE company_id = ? AND field_name = ?`,
+                [item.displayOrder, companyId, item.fieldName]
             );
         }
 
@@ -484,5 +548,160 @@ export const reorderCustomFields = async (req, res) => {
         if (connection) {
             connection.release();
         }
+    }
+};
+
+/**
+ * Edit/Update a custom field
+ * Only accessible by Business Heads
+ */
+export const editCustomField = async (req, res) => {
+    let connection;
+
+    try {
+        // Only Business Head and Super Admin can edit custom fields
+        if (!['business_head', 'super_admin'].includes(req.user.role)) {
+            return res.status(403).json({
+                success: false,
+                message: 'Only Business Heads can edit custom fields'
+            });
+        }
+
+        const { fieldName } = req.params;
+        const { fieldLabel, fieldType, fieldLength, enumValues, defaultValue, isRequired, isEditable, showInList, isSearchable } = req.body;
+
+        const pool = connectDB();
+        connection = await pool.getConnection();
+
+        // Get current field metadata
+        const [existing] = await connection.query(
+            `SELECT id, field_type, field_length, enum_values, is_system_field 
+             FROM custom_fields_metadata 
+             WHERE company_id = ? AND field_name = ? AND is_active = true`,
+            [req.user.company_id, fieldName]
+        );
+
+        if (existing.length === 0) {
+            return res.status(404).json({
+                success: false,
+                message: 'Field not found for your company'
+            });
+        }
+
+        if (existing[0].is_system_field) {
+            return res.status(400).json({
+                success: false,
+                message: 'Cannot edit system fields'
+            });
+        }
+
+        const currentFieldType = existing[0].field_type;
+        const currentLength = existing[0].field_length;
+        
+        await connection.beginTransaction();
+
+        try {
+            let finalFieldType = fieldType || currentFieldType;
+            let finalLength = fieldLength;
+            let columnDefinition = '';
+
+            // Build column definition based on type
+            switch (finalFieldType) {
+                case 'VARCHAR':
+                    const length = parseInt(fieldLength) || 255;
+                    if (length > 300) {
+                        finalFieldType = 'TEXT';
+                        finalLength = null;
+                        columnDefinition = 'TEXT';
+                    } else {
+                        columnDefinition = `VARCHAR(${length})`;
+                    }
+                    break;
+                case 'TEXT':
+                    columnDefinition = 'TEXT';
+                    finalLength = null;
+                    break;
+                case 'INT':
+                    columnDefinition = 'INT';
+                    finalLength = null;
+                    break;
+                case 'DECIMAL':
+                    columnDefinition = 'DECIMAL(10,2)';
+                    finalLength = null;
+                    break;
+                case 'DATE':
+                    columnDefinition = 'DATE';
+                    finalLength = null;
+                    break;
+                case 'DATETIME':
+                    columnDefinition = 'DATETIME';
+                    finalLength = null;
+                    break;
+                case 'ENUM':
+                    if (enumValues && Array.isArray(enumValues) && enumValues.length > 0) {
+                        const enumList = enumValues.map(v => `'${v.replace(/'/g, "''")}'`).join(',');
+                        columnDefinition = `ENUM(${enumList})`;
+                    } else {
+                        throw new Error('ENUM type requires at least one value');
+                    }
+                    finalLength = null;
+                    break;
+                case 'SET':
+                    if (enumValues && Array.isArray(enumValues) && enumValues.length > 0) {
+                        const setList = enumValues.map(v => `'${v.replace(/'/g, "''")}'`).join(',');
+                        columnDefinition = `SET(${setList})`;
+                    } else {
+                        throw new Error('SET type requires at least one value');
+                    }
+                    finalLength = null;
+                    break;
+                default:
+                    throw new Error('Invalid field type');
+            }
+
+            // Alter the column in customers table if type or definition changed
+            const alterQuery = `ALTER TABLE customers MODIFY COLUMN ${fieldName} ${columnDefinition}`;
+            logger.info(`Executing: ${alterQuery}`);
+            await connection.query(alterQuery);
+
+            // Prepare enum values JSON
+            const enumValuesJson = (finalFieldType === 'ENUM' || finalFieldType === 'SET') && enumValues 
+                ? JSON.stringify(enumValues) 
+                : null;
+
+            // Update metadata
+            await connection.query(
+                `UPDATE custom_fields_metadata 
+                 SET field_label = ?, field_type = ?, field_length = ?, enum_values = ?, 
+                     default_value = ?, is_required = ?, is_editable = ?, show_in_list = ?, is_searchable = ?, updated_at = CURRENT_TIMESTAMP
+                 WHERE id = ?`,
+                [fieldLabel || fieldName, finalFieldType, finalLength, enumValuesJson, defaultValue || null, isRequired || false, isEditable !== false, showInList || false, isSearchable || false, existing[0].id]
+            );
+
+            await connection.commit();
+
+            logger.info(`Custom field "${fieldName}" updated for company ${req.user.company_id} by user ${req.user.userId}`);
+
+            res.json({
+                success: true,
+                message: `Field "${fieldName}" updated successfully`,
+                fieldType: finalFieldType,
+                fieldLength: finalLength
+            });
+
+        } catch (error) {
+            await connection.rollback();
+            throw error;
+        }
+
+    } catch (error) {
+        logger.error('Error editing custom field:', error);
+        res.status(500).json({
+            success: false,
+            message: 'Failed to edit field',
+            error: error.message
+        });
+    } finally {
+        if (connection) connection.release();
     }
 };
