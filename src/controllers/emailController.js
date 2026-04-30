@@ -47,6 +47,15 @@ const resolveVars = (text, vars, customerData = {}) => {
 const senderCanAccessCustomer = async (connection, user, customerId) => {
     const { userId, role, company_id, team_id, username } = user;
 
+    console.log('🔐 Email Access Check:', {
+        user: username,
+        userId,
+        role,
+        company_id,
+        team_id,
+        customerId
+    });
+
     if (role === 'super_admin') return true;
 
     // Fetch the customer's basic scope fields
@@ -55,10 +64,24 @@ const senderCanAccessCustomer = async (connection, user, customerId) => {
          FROM customers WHERE id = ?`,
         [customerId]
     );
-    if (rows.length === 0) return false;
+    if (rows.length === 0) {
+        console.log('❌ Customer not found:', customerId);
+        return false;
+    }
     const c = rows[0];
 
-    if (String(c.company_id) !== String(company_id)) return false;
+    console.log('📋 Customer data:', {
+        customer_id: c.id,
+        company_id: c.company_id,
+        team_id: c.team_id,
+        agent_name: c.agent_name,
+        assigned_to: c.assigned_to
+    });
+
+    if (String(c.company_id) !== String(company_id)) {
+        console.log('❌ Company mismatch:', c.company_id, '!==', company_id);
+        return false;
+    }
 
     if (role === 'business_head') return true;
 
@@ -68,7 +91,9 @@ const senderCanAccessCustomer = async (connection, user, customerId) => {
             [userId]
         );
         const deptIds = adminDepts.map(d => d.department_id);
-        return deptIds.includes(c.department_id);
+        const hasAccess = deptIds.includes(c.department_id);
+        console.log('🔍 Dept admin check:', { deptIds, customer_dept: c.department_id, hasAccess });
+        return hasAccess;
     }
 
     if (role === 'sub_dept_admin') {
@@ -77,18 +102,34 @@ const senderCanAccessCustomer = async (connection, user, customerId) => {
             [userId]
         );
         const subDeptIds = adminDepts.map(d => d.sub_department_id).filter(Boolean);
-        return subDeptIds.includes(c.sub_department_id);
+        const hasAccess = subDeptIds.includes(c.sub_department_id);
+        console.log('🔍 Sub-dept admin check:', { subDeptIds, customer_subdept: c.sub_department_id, hasAccess });
+        return hasAccess;
     }
 
     if (role === 'team_leader') {
-        return String(c.team_id) === String(team_id);
+        const hasAccess = String(c.team_id) === String(team_id);
+        console.log('🔍 Team leader check:', { 
+            user_team_id: team_id, 
+            customer_team_id: c.team_id, 
+            match: hasAccess 
+        });
+        return hasAccess;
     }
 
     // Regular agent/user — must be assigned
-    return (
+    const hasAccess = (
         c.agent_name === username ||
         String(c.assigned_to) === String(userId)
     );
+    console.log('🔍 Agent check:', { 
+        agent_name: c.agent_name, 
+        username, 
+        assigned_to: c.assigned_to, 
+        userId,
+        hasAccess 
+    });
+    return hasAccess;
 };
 
 // ─────────────────────────────────────────────────────────────────────────────

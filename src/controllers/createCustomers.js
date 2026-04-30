@@ -531,9 +531,15 @@ export const createCustomer = async (req, res) => {
                         insertData[col] = customerData[col] || null;
                     }
                 } else {
-                    // Set default for agent_name if not provided
+                    // Set defaults for agent_name and team_id if not provided
                     if (col === 'agent_name') {
                         insertData[col] = req.user.username;
+                    }
+                    if (col === 'team_id' && req.user.team_id) {
+                        insertData[col] = req.user.team_id;
+                    }
+                    if (col === 'assigned_to' && req.user.userId) {
+                        insertData[col] = req.user.userId;
                     }
                 }
             }
@@ -542,6 +548,14 @@ export const createCustomer = async (req, res) => {
         // Construct dynamic INSERT SQL
         const insertColumns = Object.keys(insertData);
         const insertValues = Object.values(insertData);
+
+        console.log('📝 Inserting customer with data:', {
+            company_id: insertData.company_id,
+            team_id: insertData.team_id,
+            agent_name: insertData.agent_name,
+            assigned_to: insertData.assigned_to,
+            C_unique_id: insertData.C_unique_id
+        });
 
         const sql = `INSERT INTO customers (${insertColumns.join(', ')}) 
                      VALUES (${insertColumns.map(() => '?').join(', ')})`;

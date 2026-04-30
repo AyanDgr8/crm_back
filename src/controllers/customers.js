@@ -3,12 +3,12 @@
 import connectDB from '../db/index.js';
 
 export const searchCustomers = async (req, res) => {
-  const { query } = req.query;
+  const { query, field1, query1, startDate1, endDate1, field2, query2, startDate2, endDate2 } = req.query;
   const user = req.user; // Get the current user from the request
 
   try {
     // Check if user exists in request
-    if (!req.user) {
+    if (!user) {
       return res.status(401).json({ message: 'Authentication required' });
     }
 
@@ -19,18 +19,51 @@ export const searchCustomers = async (req, res) => {
     // Ensure user role exists, default to 'User' if undefined
     const userRole = req.user.role || 'User';
 
-    const searchParam = `%${query}%`;
-    const searchFields = [
-      'c.first_name', 'c.last_name', 'c.company_name', 'c.phone_no',
-      'c.email_id', 'c.address', 'c.lead_source', 'c.call_status',
-      'c.call_outcome', 'c.product', 'c.budget', 'c.decision_making',
-      'c.decision_time', 'c.lead_stage', 'c.agent_name', 'c.priority_level',
-      'c.customer_category', 'c.tags_labels', 'c.communcation_channel', 'c.deal_value',
-      'c.conversion_status', 'c.customer_history', 'c.agent_name', 'c.C_unique_id',
-      'c.comment', 'c.last_updated', 'c.id'
-    ];
+    // Build search conditions based on new multi-field parameters
+    let searchConditions = '';
+    let searchParams = [];
 
-    const searchConditions = searchFields.map(field => `${field} LIKE ?`).join(' OR ');
+    // Handle new multi-field search
+    if (field1) {
+      // First filter
+      if (startDate1 && endDate1) {
+        // Date range search
+        searchConditions += `c.${field1} BETWEEN ? AND ?`;
+        searchParams.push(startDate1, endDate1);
+      } else if (query1) {
+        // Text/enum search
+        searchConditions += `c.${field1} LIKE ?`;
+        searchParams.push(`%${query1}%`);
+      }
+
+      // Second filter (AND condition)
+      if (field2) {
+        searchConditions += ' AND ';
+        if (startDate2 && endDate2) {
+          searchConditions += `c.${field2} BETWEEN ? AND ?`;
+          searchParams.push(startDate2, endDate2);
+        } else if (query2) {
+          searchConditions += `c.${field2} LIKE ?`;
+          searchParams.push(`%${query2}%`);
+        }
+      }
+    } else if (query) {
+      // Legacy search - search across multiple fields
+      const searchParam = `%${query}%`;
+      const searchFields = [
+        'c.first_name', 'c.last_name', 'c.company_name', 'c.phone_no',
+        'c.email_id', 'c.address', 'c.lead_source', 'c.call_status',
+        'c.call_outcome', 'c.product', 'c.budget', 'c.decision_making',
+        'c.decision_time', 'c.lead_stage', 'c.agent_name', 'c.priority_level',
+        'c.customer_category', 'c.tags_labels', 'c.communcation_channel', 'c.deal_value',
+        'c.conversion_status', 'c.customer_history', 'c.agent_name', 'c.C_unique_id',
+        'c.comment', 'c.last_updated', 'c.id'
+      ];
+      searchConditions = searchFields.map(field => `${field} LIKE ?`).join(' OR ');
+      searchParams = searchFields.map(() => searchParam);
+    } else {
+      return res.status(400).json({ message: 'Search query required' });
+    }
 
     // Build the base query with role-based access control
     if (userRole === 'super_admin') {
@@ -39,14 +72,14 @@ export const searchCustomers = async (req, res) => {
         SELECT c.* FROM customers c
         WHERE ${searchConditions}
       `;
-      params = searchFields.map(() => searchParam);
+      params = searchParams;
     } else if (userRole === 'business_head') {
       // Business Head can search ALL customers from THEIR company
       sql = `
         SELECT c.* FROM customers c
         WHERE c.company_id = ? AND (${searchConditions})
       `;
-      params = [req.user.company_id, ...searchFields.map(() => searchParam)];
+      params = [req.user.company_id, ...searchParams];
     } else if (userRole === 'dept_admin' || userRole === 'sub_dept_admin' || userRole === 'admin') {
       // Dept Admin / Sub-Dept Admin can search within their assigned departments/sub-departments
       const [adminDepts] = await connection.query(
@@ -82,7 +115,7 @@ export const searchCustomers = async (req, res) => {
         SELECT c.* FROM customers c
         WHERE c.company_id = ? AND (${scopeWhere}) AND (${searchConditions})
       `;
-      params = [req.user.company_id, ...scopeParams, ...searchFields.map(() => searchParam)];
+      params = [req.user.company_id, ...scopeParams, ...searchParams];
     } else if (userRole === 'team_leader' || userRole === 'user') {
       // Team Leader / User search within their permitted scope
       const [permissions] = await connection.query(
@@ -116,7 +149,7 @@ export const searchCustomers = async (req, res) => {
         SELECT c.* FROM customers c
         WHERE ${scopeWhere} AND (${searchConditions})
       `;
-      params = [...scopeParams, ...searchFields.map(() => searchParam)];
+      params = [...scopeParams, ...searchParams];
     } else {
       return res.status(403).json({ message: 'Unauthorized role' });
     }
