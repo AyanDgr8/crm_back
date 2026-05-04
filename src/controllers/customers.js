@@ -699,7 +699,130 @@ export const getTeamRecords = async (req, res) => {
     const pool = await connectDB();
     connection = await pool.getConnection();
 
-    const team_leader = req.params.team_leader;
+    // Read team_leader from query params, body, or route params
+    const team_leader = req.query.team_leader || req.body.team_leader || req.params.team_leader;
+    
+    // ============================================================
+    // POST REQUEST: Import/Create leads
+    // ============================================================
+    if (req.method === 'POST' && req.body.leads_array) {
+      if (!team_leader) {
+        connection.release();
+        return res.status(400).json({
+          success: false,
+          message: "Team leader name is required for importing leads"
+        });
+      }
+
+      const { 
+        leads_array, 
+        first_name = "first_name", 
+        last_name = "last_name",
+        number = "mobile",
+        priority,
+        ticket_id,
+        dial_retries,
+        first_cooloff,
+        cooloff,
+        notes,
+        skill,
+        extension
+      } = req.body;
+
+      // Parse leads data
+      let leadsData;
+      try {
+        leadsData = typeof leads_array === 'string' ? JSON.parse(leads_array) : leads_array;
+      } catch (parseError) {
+        connection.release();
+        return res.status(400).json({
+          success: false,
+          message: "Invalid leads_array format. Must be valid JSON."
+        });
+      }
+
+      if (!Array.isArray(leadsData) || leadsData.length === 0) {
+        connection.release();
+        return res.status(400).json({
+          success: false,
+          message: "leads_array must be a non-empty array"
+        });
+      }
+
+      // Get company_id for the team leader
+      const [userResult] = await connection.query(
+        'SELECT company_id, team_id, id FROM users WHERE username = ? LIMIT 1',
+        [team_leader]
+      );
+
+      if (userResult.length === 0) {
+        connection.release();
+        return res.status(404).json({
+          success: false,
+          message: `Team leader '${team_leader}' not found`
+        });
+      }
+
+      const { company_id, team_id, id: user_id } = userResult[0];
+
+      // Get the latest C_unique_id
+      const [lastIdResult] = await connection.query(
+        'SELECT C_unique_id FROM customers ORDER BY CAST(SUBSTRING(C_unique_id, 4) AS UNSIGNED) DESC LIMIT 1'
+      );
+      const lastId = lastIdResult[0]?.C_unique_id || 'FF_0';
+      let lastNumericPart = parseInt(lastId.split('_')[1]) || 0;
+
+      // Import leads
+      const importedLeads = [];
+      const failedLeads = [];
+
+      await connection.beginTransaction();
+
+      for (const lead of leadsData) {
+        try {
+          const firstName = lead[first_name] || '';
+          const lastName = lead[last_name] || '';
+          const phoneNo = lead[number] || '';
+
+          if (!phoneNo) {
+            failedLeads.push({ lead, reason: 'Missing phone number' });
+            continue;
+          }
+
+          // Generate next C_unique_id
+          lastNumericPart++;
+          const nextId = `FF_${lastNumericPart}`;
+
+          // Insert customer
+          await connection.query(
+            `INSERT INTO customers 
+            (company_id, team_id, C_unique_id, first_name, last_name, phone_no, agent_name, assigned_to) 
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+            [company_id, team_id, nextId, firstName, lastName, phoneNo, team_leader, user_id]
+          );
+
+          importedLeads.push({ C_unique_id: nextId, phone_no: phoneNo, first_name: firstName });
+        } catch (insertError) {
+          console.error('Error inserting lead:', insertError);
+          failedLeads.push({ lead, reason: insertError.message });
+        }
+      }
+
+      await connection.commit();
+      connection.release();
+
+      return res.status(200).json({
+        success: true,
+        message: `Imported ${importedLeads.length} leads successfully`,
+        imported: importedLeads.length,
+        failed: failedLeads.length,
+        failedLeads: failedLeads
+      });
+    }
+
+    // ============================================================
+    // GET REQUEST: Fetch leads
+    // ============================================================
     if (!team_leader) {
       connection.release();
       return res.status(400).json({
@@ -710,7 +833,8 @@ export const getTeamRecords = async (req, res) => {
 
     // For admin users (IT_ADMIN, BUSINESS_HEAD), allow access to any team's records
     // For team leaders, only allow access to their own team's records
-    if (req.user.role.toLowerCase() === 'team_leader' &&
+    // Skip role check if no user is authenticated (external API access)
+    if (req.user && req.user.role && req.user.role.toLowerCase() === 'team_leader' &&
       req.user.username.toLowerCase() !== team_leader.toLowerCase()) {
       connection.release();
       return res.status(403).json({
@@ -760,6 +884,11 @@ export const getTeamRecords = async (req, res) => {
   } catch (error) {
     console.error("Error in getTeamRecords:", error);
     if (connection) {
+      try {
+        await connection.rollback();
+      } catch (rollbackError) {
+        console.error("Rollback error:", rollbackError);
+      }
       connection.release();
     }
     return res.status(500).json({

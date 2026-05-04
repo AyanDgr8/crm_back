@@ -169,8 +169,9 @@ router.get('/customers/date-range', authenticateToken, checkPermission('download
 // Route to check duplicates
 router.post('/customers/check-duplicates', authenticateToken, checkDuplicates);
 
-// Route to get team records with field mapping
-router.post('/records_info', getTeamRecords);
+// Route to get/import team records with field mapping
+router.get('/records_info', getTeamRecords);  // GET: Fetch leads
+router.post('/records_info', getTeamRecords); // POST: Import leads
 
 // Route to get schedule records with field mapping
 router.post('/records_schedule', getScheduleRecords);
