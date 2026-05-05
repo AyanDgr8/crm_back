@@ -3,12 +3,209 @@
 import fs from 'fs';
 import path from 'path';
 import qrcode from 'qrcode';
-import { makeWASocket, DisconnectReason, useMultiFileAuthState, Browsers } from '@whiskeysockets/baileys';
+import { 
+    makeWASocket, 
+    DisconnectReason, 
+    useMultiFileAuthState, 
+    Browsers, 
+    downloadMediaMessage,
+    fetchLatestBaileysVersion,
+    makeCacheableSignalKeyStore,
+    isJidBroadcast
+} from '@whiskeysockets/baileys';
 import { logger } from '../logger.js';
 import connectDB from '../db/index.js';
+import { fileURLToPath } from 'url';
+import { dirname } from 'path';
+import NodeCache from '@cacheable/node-cache';
+import P from 'pino';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
+
+// Create Baileys logger
+const baileysLogger = P({ timestamp: () => `,"time":"${new Date().toJSON()}"` });
+baileysLogger.level = 'silent'; // Set to 'trace' for debugging
+
+// External map to store retry counts of messages when decryption/encryption fails
+const msgRetryCounterCache = new NodeCache();
 
 // Store active instances
 export const instances = {};
+
+// Handle incoming WhatsApp messages
+const handleIncomingMessage = async (message, instanceId, registerId, sock) => {
+    let conn;
+    try {
+        const pool = connectDB();
+        conn = await pool.getConnection();
+
+        // Extract message details
+        const messageId = message.key.id;
+        const remoteJid = message.key.remoteJid;
+        const participant = message.key.participant; // The actual sender in groups
+        const senderPn = message.key.senderPn; // The actual sender in channels (NEW!)
+        
+        // Filter out broadcasts and status
+        const isBroadcast = remoteJid.includes('broadcast');
+        const isStatus = remoteJid === 'status@broadcast';
+        
+        // Skip broadcasts and status updates
+        if (isBroadcast || isStatus) {
+            logger.info(`Skipping message from ${remoteJid} (broadcast/status)`);
+            return;
+        }
+        
+        // Determine the actual sender
+        let senderJid;
+        const isGroup = remoteJid.endsWith('@g.us');
+        const isChannel = remoteJid.includes('@lid') || remoteJid.includes('@newsletter');
+        
+        if (isChannel && senderPn) {
+            // Channel message - use senderPn field
+            senderJid = senderPn;
+            logger.info(`Channel message from senderPn: ${senderPn}`);
+        } else if (isGroup && participant) {
+            // Group message - use participant field
+            senderJid = participant;
+            logger.info(`Group message from participant: ${participant}`);
+        } else if (!isGroup && !isChannel) {
+            // Direct message - use remoteJid
+            senderJid = remoteJid;
+        } else {
+            // Channel/group message without sender info - skip it
+            logger.info(`Skipping ${isChannel ? 'channel' : 'group'} message without sender info: ${remoteJid}`);
+            return;
+        }
+        
+        // Extract clean phone number (remove @s.whatsapp.net or @lid suffix)
+        const senderNumber = senderJid.split('@')[0];
+        const senderName = message.pushName || 'Unknown';
+        const messageTimestamp = message.messageTimestamp;
+        
+        logger.info(`Processing message from ${senderNumber} (${senderName}), remoteJid: ${remoteJid}`);
+
+        // Get instance details
+        const [instanceData] = await conn.query(
+            'SELECT i.*, u.company_id, u.team_id, c.company_name, t.team_name FROM instances i LEFT JOIN users u ON i.register_id = u.email LEFT JOIN companies c ON u.company_id = c.id LEFT JOIN teams t ON u.team_id = t.id WHERE i.instance_id = ?',
+            [instanceId]
+        );
+
+        const companyId = instanceData[0]?.company_id || null;
+        const companyName = instanceData[0]?.company_name || null;
+        const teamId = instanceData[0]?.team_id || null;
+        const teamName = instanceData[0]?.team_name || null;
+        const receiverNumber = registerId;
+
+        let messageType = 'text_message';
+        let messageContent = '';
+        let mediaUrl = null;
+        let mediaFilename = null;
+        let mediaMimetype = null;
+
+        // Determine message type and extract content
+        if (message.message?.conversation) {
+            messageType = 'text_message';
+            messageContent = message.message.conversation;
+        } else if (message.message?.extendedTextMessage) {
+            messageType = 'text_message';
+            messageContent = message.message.extendedTextMessage.text;
+        } else if (message.message?.imageMessage) {
+            messageType = 'image';
+            messageContent = message.message.imageMessage.caption || '';
+            mediaMimetype = message.message.imageMessage.mimetype;
+            
+            // Download media
+            const buffer = await downloadMediaMessage(message, 'buffer', {});
+            const filename = `whatsapp_${Date.now()}_${messageId}.${mediaMimetype.split('/')[1]}`;
+            const uploadDir = path.join(__dirname, '../../public/uploads/whatsapp');
+            
+            if (!fs.existsSync(uploadDir)) {
+                fs.mkdirSync(uploadDir, { recursive: true });
+            }
+            
+            const filepath = path.join(uploadDir, filename);
+            fs.writeFileSync(filepath, buffer);
+            
+            mediaUrl = `/uploads/whatsapp/${filename}`;
+            mediaFilename = filename;
+        } else if (message.message?.videoMessage) {
+            messageType = 'video';
+            messageContent = message.message.videoMessage.caption || '';
+            mediaMimetype = message.message.videoMessage.mimetype;
+            
+            const buffer = await downloadMediaMessage(message, 'buffer', {});
+            const filename = `whatsapp_${Date.now()}_${messageId}.${mediaMimetype.split('/')[1]}`;
+            const uploadDir = path.join(__dirname, '../../public/uploads/whatsapp');
+            
+            if (!fs.existsSync(uploadDir)) {
+                fs.mkdirSync(uploadDir, { recursive: true });
+            }
+            
+            const filepath = path.join(uploadDir, filename);
+            fs.writeFileSync(filepath, buffer);
+            
+            mediaUrl = `/uploads/whatsapp/${filename}`;
+            mediaFilename = filename;
+        } else if (message.message?.documentMessage) {
+            messageType = 'document';
+            messageContent = message.message.documentMessage.caption || '';
+            mediaMimetype = message.message.documentMessage.mimetype;
+            mediaFilename = message.message.documentMessage.fileName;
+            
+            const buffer = await downloadMediaMessage(message, 'buffer', {});
+            const filename = `whatsapp_${Date.now()}_${messageId}_${mediaFilename}`;
+            const uploadDir = path.join(__dirname, '../../public/uploads/whatsapp');
+            
+            if (!fs.existsSync(uploadDir)) {
+                fs.mkdirSync(uploadDir, { recursive: true });
+            }
+            
+            const filepath = path.join(uploadDir, filename);
+            fs.writeFileSync(filepath, buffer);
+            
+            mediaUrl = `/uploads/whatsapp/${filename}`;
+        } else if (message.message?.audioMessage) {
+            messageType = 'audio';
+            mediaMimetype = message.message.audioMessage.mimetype;
+            
+            const buffer = await downloadMediaMessage(message, 'buffer', {});
+            const filename = `whatsapp_${Date.now()}_${messageId}.${mediaMimetype.split('/')[1]}`;
+            const uploadDir = path.join(__dirname, '../../public/uploads/whatsapp');
+            
+            if (!fs.existsSync(uploadDir)) {
+                fs.mkdirSync(uploadDir, { recursive: true });
+            }
+            
+            const filepath = path.join(uploadDir, filename);
+            fs.writeFileSync(filepath, buffer);
+            
+            mediaUrl = `/uploads/whatsapp/${filename}`;
+            mediaFilename = filename;
+        }
+
+        // Save to database
+        await conn.query(
+            `INSERT INTO whatsapp_messages 
+            (message_id, instance_id, sender_number, sender_name, receiver_number, receiver_name, 
+            message_type, message_content, media_url, media_filename, media_mimetype, 
+            company_id, company_name, team_id, team_name, direction, message_timestamp) 
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'incoming', ?)`,
+            [
+                messageId, instanceId, senderNumber, senderName, receiverNumber, receiverNumber,
+                messageType, messageContent, mediaUrl, mediaFilename, mediaMimetype,
+                companyId, companyName, teamId, teamName, messageTimestamp
+            ]
+        );
+
+        logger.info(`Saved incoming message from ${senderNumber} to database`);
+
+    } catch (error) {
+        logger.error('Error handling incoming message:', error);
+    } finally {
+        if (conn) conn.release();
+    }
+};
 
 // Initialize WhatsApp connection
 export const initializeSock = async (instanceId, registerId) => {
@@ -24,21 +221,25 @@ export const initializeSock = async (instanceId, registerId) => {
         if (!fs.existsSync(authFolder)) fs.mkdirSync(authFolder, { recursive: true });
 
         const { state, saveCreds } = await useMultiFileAuthState(authFolder);
+        
+        // Fetch latest version of WA Web
+        const { version, isLatest } = await fetchLatestBaileysVersion();
+        logger.info(`Using WA v${version.join('.')}, isLatest: ${isLatest}`);
 
         const sock = makeWASocket({
-            auth: state,
+            version,
+            logger: baileysLogger,
+            auth: {
+                creds: state.creds,
+                keys: makeCacheableSignalKeyStore(state.keys, baileysLogger),
+            },
+            msgRetryCounterCache,
+            generateHighQualityLinkPreview: true,
             printQRInTerminal: false,
-            // emulate desktop client to get richer history & avoid WA web quirks
-            browser: Browsers.macOS('Desktop'),
-            connectTimeoutMs: 120000,
-            defaultQueryTimeoutMs: 90000,
-            keepAliveIntervalMs: 15000,
-            emitOwnEvents: true,
-            markOnlineOnConnect: true,
-            retryRequestDelayMs: 500
+            shouldIgnoreJid: jid => isJidBroadcast(jid),
+            // Browser configuration
+            browser: Browsers.macOS('Desktop')
         });
-
-        sock.ev.on('creds.update', saveCreds);
 
         const connectionPromise = new Promise((resolve, reject) => {
             const timeout = setTimeout(() => {
@@ -47,100 +248,165 @@ export const initializeSock = async (instanceId, registerId) => {
 
             let hasResolved = false;
 
-            sock.ev.on('connection.update', async (update) => {
-                const { connection, qr, lastDisconnect } = update;
-                
-                if (qr && !hasResolved) {
-                    try {
-                        const url = await qrcode.toDataURL(qr);
-                        instances[instanceId] = {
-                            sock,
-                            qrCode: url,
-                            status: 'disconnected',
-                            lastUpdate: new Date(),
-                            registerId
-                        };
+            // Use sock.ev.process() - the correct Baileys v6+ API
+            sock.ev.process(
+                async(events) => {
+                    // Handle connection updates
+                    if(events['connection.update']) {
+                        const update = events['connection.update'];
+                        const { connection, qr, lastDisconnect } = update;
                         
-                        if (!hasResolved) {
-                            resolve({ qrCode: url });
-                            hasResolved = true;
+                        logger.info('Connection update:', update);
+
+                        if (qr && !hasResolved) {
+                            logger.info(`Generating QR code for instance ${instanceId}`);
+                            try {
+                                const url = await qrcode.toDataURL(qr);
+                                logger.debug('QR Code URL generated successfully');
+                                
+                                instances[instanceId] = {
+                                    sock,
+                                    qrCode: url,
+                                    status: 'disconnected',
+                                    lastUpdate: new Date(),
+                                    registerId
+                                };
+                                
+                                if (!hasResolved) {
+                                    resolve({ qrCode: url });
+                                    hasResolved = true;
+                                    clearTimeout(timeout);
+                                }
+                            } catch (err) {
+                                logger.error('Error generating QR code URL:', err);
+                                if (!hasResolved) {
+                                    reject(err);
+                                    hasResolved = true;
+                                }
+                            }
                         }
-                    } catch (err) {
-                        logger.error('Error generating QR code:', err);
-                        reject(err);
+
+                        if(connection === 'close') {
+                            const shouldReconnect = lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
+                            
+                            if (shouldReconnect) {
+                                logger.info(`Attempting to reconnect instance ${instanceId}`);
+                                instances[instanceId] = {
+                                    status: 'reconnecting',
+                                    lastUpdate: new Date()
+                                };
+                                
+                                try {
+                                    const pool = connectDB();
+                                    conn = await pool.getConnection();
+                                    await conn.query('UPDATE instances SET status = ? WHERE instance_id = ?', ['reconnecting', instanceId]);
+                                } catch(dbError) {
+                                    logger.error("DB update failed in 'close' (reconnect) state", dbError);
+                                } finally {
+                                    if (conn) conn.release();
+                                }
+
+                                setTimeout(async () => {
+                                    try {
+                                        await initializeSock(instanceId, registerId);
+                                    } catch (reconnectError) {
+                                        logger.error(`Reconnection failed for instance ${instanceId}:`, reconnectError);
+                                    }
+                                }, 5000);
+                            } else {
+                                logger.info(`Connection closed. User logged out for instance ${instanceId}`);
+                                instances[instanceId] = {
+                                    status: 'logged_out',
+                                    lastUpdate: new Date()
+                                };
+                                
+                                try {
+                                    const pool = connectDB();
+                                    conn = await pool.getConnection();
+                                    await conn.query('UPDATE instances SET status = ? WHERE instance_id = ?', ['disconnected', instanceId]);
+                                } catch(dbError) {
+                                    logger.error("DB update failed in 'close' (no-reconnect) state", dbError);
+                                } finally {
+                                    if (conn) conn.release();
+                                }
+                                
+                                if (!hasResolved) {
+                                    reject(new Error('User logged out. Please generate a new QR code.'));
+                                    hasResolved = true;
+                                }
+                            }
+                        }
+
+                        if (connection === 'open') {
+                            logger.info(`Connection opened for instance ${instanceId}`);
+                            clearTimeout(timeout);
+                            
+                            instances[instanceId] = {
+                                sock,
+                                status: 'connected',
+                                lastUpdate: new Date(),
+                                registerId
+                            };
+
+                            try {
+                                const pool = connectDB();
+                                conn = await pool.getConnection();
+                                await conn.query('UPDATE instances SET status = ? WHERE instance_id = ?', ['connected', instanceId]);
+                            } catch(dbError) {
+                                logger.error("DB update failed in 'open' state", dbError);
+                            } finally {
+                                if (conn) conn.release();
+                            }
+
+                            if (!hasResolved) {
+                                resolve({ connected: true });
+                                hasResolved = true;
+                            }
+                        }
+                    }
+
+                    // Handle credentials update
+                    if(events['creds.update']) {
+                        await saveCreds();
+                    }
+
+                    // Handle incoming messages
+                    if (events['messages.upsert']) {
+                        const upsert = events['messages.upsert'];
+                        logger.info('Received messages:', JSON.stringify(upsert, undefined, 2));
+
+                        if (upsert.type === 'notify') {
+                            for (const msg of upsert.messages) {
+                                if (!msg.key.fromMe) {
+                                    // Log the complete message key structure
+                                    logger.info('Message key details:', {
+                                        remoteJid: msg.key.remoteJid,
+                                        participant: msg.key.participant,
+                                        fromMe: msg.key.fromMe,
+                                        id: msg.key.id,
+                                        pushName: msg.pushName
+                                    });
+                                    
+                                    try {
+                                        await handleIncomingMessage(msg, instanceId, registerId, sock);
+                                    } catch (error) {
+                                        logger.error('Error storing incoming message:', error);
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // Handle message updates
+                    if(events['messages.update']) {
+                        logger.info('Messages updated:', JSON.stringify(events['messages.update'], undefined, 2));
+                    }
+
+                    if(events['message-receipt.update']) {
+                        logger.info('Message receipt update:', events['message-receipt.update']);
                     }
                 }
-
-                if (connection === 'open') {
-                    clearTimeout(timeout);
-                    
-                    instances[instanceId] = {
-                        sock,
-                        status: 'connected',
-                        lastUpdate: new Date(),
-                        registerId
-                    };
-
-                    try {
-                        const pool = connectDB();
-                        conn = await pool.getConnection();
-                        await conn.query('UPDATE instances SET status = ? WHERE instance_id = ?', ['connected', instanceId]);
-                    } catch(dbError) {
-                        logger.error("DB update failed in 'open' state", dbError);
-                    } finally {
-                        if (conn) conn.release();
-                    }
-
-                    await saveCreds();
-
-                    if (!hasResolved) {
-                        resolve({ connected: true });
-                        hasResolved = true;
-                    }
-                }
-
-                if (connection === 'close') {
-                    const shouldReconnect = lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
-                    
-                    if (shouldReconnect) {
-                        if(instances[instanceId]) {
-                            instances[instanceId].status = 'reconnecting';
-                            instances[instanceId].lastUpdate = new Date();
-                        }
-                        
-                        try {
-                            const pool = connectDB();
-                            conn = await pool.getConnection();
-                            await conn.query('UPDATE instances SET status = ? WHERE instance_id = ?', ['reconnecting', instanceId]);
-                        } catch(dbError) {
-                            logger.error("DB update failed in 'close' (reconnect) state", dbError);
-                        } finally {
-                            if (conn) conn.release();
-                        }
-
-                        setTimeout(() => initializeSock(instanceId, registerId).catch(logger.error), 5000);
-                    } else {
-                        if(instances[instanceId]) {
-                            instances[instanceId].status = 'disconnected';
-                            instances[instanceId].lastUpdate = new Date();
-                        }
-
-                        try {
-                            const pool = connectDB();
-                            conn = await pool.getConnection();
-                            await conn.query('UPDATE instances SET status = ? WHERE instance_id = ?', ['disconnected', instanceId]);
-                        } catch(dbError) {
-                            logger.error("DB update failed in 'close' (no-reconnect) state", dbError);
-                        } finally {
-                            if (conn) conn.release();
-                        }
-
-                        if (!hasResolved) {
-                            reject(new Error('Connection closed'));
-                        }
-                    }
-                }
-            });
+            );
         });
 
         return connectionPromise;
@@ -415,9 +681,11 @@ export const updateInstance = async (req, res) => {
 };
 
 export const sendMessage = async (req, res) => {
+    let conn;
     try {
         const { instanceId } = req.params;
         const { messages } = req.body;
+        const registerId = req.user.email;
 
         if (!messages || !Array.isArray(messages) || messages.length === 0) {
             return res.status(400).json({ success: false, message: 'Messages array is required' });
@@ -429,15 +697,55 @@ export const sendMessage = async (req, res) => {
             return res.status(400).json({ success: false, message: 'WhatsApp instance not connected' });
         }
 
+        const pool = connectDB();
+        conn = await pool.getConnection();
+
+        // Get instance details for company/team info
+        const [instanceData] = await conn.query(
+            'SELECT i.*, u.company_id, u.team_id, c.company_name, t.team_name FROM instances i LEFT JOIN users u ON i.register_id = u.email LEFT JOIN companies c ON u.company_id = c.id LEFT JOIN teams t ON u.team_id = t.id WHERE i.instance_id = ?',
+            [instanceId]
+        );
+
+        const companyId = instanceData[0]?.company_id || null;
+        const companyName = instanceData[0]?.company_name || null;
+        const teamId = instanceData[0]?.team_id || null;
+        const teamName = instanceData[0]?.team_name || null;
+
         for (const msg of messages) {
             if (!msg.number || !msg.text) continue;
-            const jid = msg.number.replace(/\D/g, '') + '@s.whatsapp.net';
-            await sock.sendMessage(jid, { text: msg.text });
+            
+            // Clean phone number and create JID
+            const cleanNumber = msg.number.replace(/\D/g, '');
+            const jid = cleanNumber + '@s.whatsapp.net';
+            
+            // Send the message
+            const sentMsg = await sock.sendMessage(jid, { text: msg.text });
+            
+            // Save to database
+            const messageId = sentMsg.key.id;
+            const messageTimestamp = Math.floor(Date.now() / 1000);
+            
+            await conn.query(
+                `INSERT INTO whatsapp_messages 
+                (message_id, instance_id, sender_number, sender_name, receiver_number, receiver_name, 
+                message_type, message_content, media_url, media_filename, media_mimetype, 
+                company_id, company_name, team_id, team_name, direction, message_timestamp) 
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'outgoing', ?)`,
+                [
+                    messageId, instanceId, registerId, registerId, cleanNumber, cleanNumber,
+                    'text_message', msg.text, null, null, null,
+                    companyId, companyName, teamId, teamName, messageTimestamp
+                ]
+            );
+            
+            logger.info(`Sent and saved message to ${cleanNumber}`);
         }
 
         return res.json({ success: true, message: 'Messages sent successfully' });
     } catch (error) {
         logger.error('Error sending WhatsApp message:', error);
         return res.status(500).json({ success: false, message: 'Failed to send message', error: error.message });
+    } finally {
+        if (conn) conn.release();
     }
 };

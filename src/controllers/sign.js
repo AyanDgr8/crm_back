@@ -230,11 +230,13 @@ export const loginCustomer = async (req, res) => {
 
         await connection.beginTransaction();
 
-        // Get user with role
+        // Get user with role, company, and team
         const [users] = await connection.query(
-            `SELECT u.*, r.role_name 
+            `SELECT u.*, r.role_name, c.company_name, t.team_name
              FROM users u 
              JOIN roles r ON u.role_id = r.id 
+             LEFT JOIN companies c ON u.company_id = c.id
+             LEFT JOIN teams t ON u.team_id = t.id
              WHERE u.email = ?`,
             [email]
         );
@@ -346,9 +348,11 @@ export const loginCustomer = async (req, res) => {
             email: user.email,
             role: roleName,
             company_id: user.company_id || null, // CRITICAL: For multi-tenant isolation
+            company_name: user.company_name || null,
+            team_id: user.team_id,
+            team_name: user.team_name || null,
             deviceId,
             sessionId: session.insertId,
-            team_id: user.team_id,
             permissions: userPermissions
         }, process.env.JWT_SECRET, { expiresIn: '24h' });
 

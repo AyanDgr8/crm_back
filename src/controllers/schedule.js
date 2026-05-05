@@ -173,10 +173,9 @@ export const getAllReminders = async (req, res) => {
             TIMESTAMPDIFF(MINUTE, NOW(), s.scheduled_at) as minutes_until_call
         `;
 
-        // Define time condition for future reminders
+        // Show all reminders (past and future)
         const timeCondition = `
             s.scheduled_at IS NOT NULL
-            AND s.scheduled_at > NOW()
         `;
 
         if (role === 'super_admin' || role === 'it_admin' || role === 'business_head') {

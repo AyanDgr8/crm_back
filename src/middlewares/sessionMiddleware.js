@@ -25,7 +25,8 @@ export const validateSession = async (req, res, next) => {
     let connection;
     try {
         const decoded = jwt.verify(token, process.env.JWT_SECRET);
-        connection = await connectDB();
+        const pool = connectDB();
+        connection = await pool.getConnection();
 
         // Use a shorter transaction with retry logic
         let retries = 3;

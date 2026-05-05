@@ -47,6 +47,13 @@ import {
     markAllNotificationsRead
 } from '../controllers/deleteNotificationsController.js';
 
+import {
+    getWhatsAppMessages,
+    getConversation,
+    getMessageStats,
+    getConversationList
+} from '../controllers/whatsappMessages.js';
+
 // Multi-tenant imports
 import {
     createCompany,
@@ -63,6 +70,20 @@ import {
     createSubDepartment, getSubDepartments, updateSubDepartment, deleteSubDepartment,
     assignAdminToDepartment, removeAdminFromDepartment, getAdminDepartmentAssignments
 } from '../controllers/departments.js';
+
+import { 
+    sendNewCustomerWhatsApp, sendCustomerNotification
+} from '../controllers/sendWhatsapp.js';
+
+import { 
+  generateQRCode, 
+  getConnectionStatus, 
+  resetInstance, 
+  saveInstanceToDB, 
+  getUserInstances, 
+  updateInstance,
+  sendMessage 
+} from '../controllers/whatsapp.js';
 
 const router = express.Router();
 
@@ -260,5 +281,29 @@ router.post('/email/templates',          authenticateToken, createEmailTemplate)
 router.put('/email/templates/:id',       authenticateToken, updateEmailTemplate);
 router.delete('/email/templates/:id',    authenticateToken, deleteEmailTemplate);
 router.get('/email/logs/:customerId',    authenticateToken, getEmailLogs);
+
+
+// ============================================================================
+// WHATSAPP ROUTES
+// ============================================================================
+
+router.post('/send-whatsapp', authenticateToken, sendNewCustomerWhatsApp);
+
+router.get('/whatsapp/init/:instanceId', authenticateToken, validateSession, generateQRCode);
+router.get('/whatsapp/status/:instanceId', authenticateToken, validateSession, getConnectionStatus);
+router.post('/whatsapp/reset/:instanceId', authenticateToken, validateSession, resetInstance);
+router.post('/whatsapp/send/:instanceId', authenticateToken, validateSession, sendMessage);
+
+// Instance management routes
+router.post('/instances', authenticateToken, validateSession, saveInstanceToDB);
+router.get('/instances/:register_id', authenticateToken, validateSession, getUserInstances);
+
+// WhatsApp Messages routes
+router.get('/whatsapp/messages', authenticateToken, validateSession, getWhatsAppMessages);
+router.get('/whatsapp/conversation/:phoneNumber', authenticateToken, validateSession, getConversation);
+router.get('/whatsapp/messages/stats', authenticateToken, validateSession, getMessageStats);
+router.get('/whatsapp/conversations', authenticateToken, validateSession, getConversationList);
+router.put('/instances/:instance_id', authenticateToken, validateSession, updateInstance);
+
 
 export default router;

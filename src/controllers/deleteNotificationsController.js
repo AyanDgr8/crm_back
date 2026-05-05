@@ -40,8 +40,8 @@ const findApprover = async (conn, requester) => {
             if (rows[0]) return rows[0];
         }
 
-        // Fallback: search for any sub_dept_admin in the same company
-        const [fallback] = await conn.query(
+        // Fallback 1: search for any sub_dept_admin in the same company
+        const [subDeptAdmins] = await conn.query(
             `SELECT u.id, u.username, u.company_id
              FROM users u
              JOIN roles r ON r.id = u.role_id
@@ -49,7 +49,29 @@ const findApprover = async (conn, requester) => {
              LIMIT 1`,
             [requester.company_id]
         );
-        return fallback[0] || null;
+        if (subDeptAdmins[0]) return subDeptAdmins[0];
+
+        // Fallback 2: search for any dept_admin in the same company
+        const [deptAdmins] = await conn.query(
+            `SELECT u.id, u.username, u.company_id
+             FROM users u
+             JOIN roles r ON r.id = u.role_id
+             WHERE r.role_name = 'dept_admin' AND u.company_id = ?
+             LIMIT 1`,
+            [requester.company_id]
+        );
+        if (deptAdmins[0]) return deptAdmins[0];
+
+        // Fallback 3: search for business_head in the same company
+        const [businessHeads] = await conn.query(
+            `SELECT u.id, u.username, u.company_id
+             FROM users u
+             JOIN roles r ON r.id = u.role_id
+             WHERE r.role_name = 'business_head' AND u.company_id = ?
+             LIMIT 1`,
+            [requester.company_id]
+        );
+        return businessHeads[0] || null;
     }
 
     if (requester.role === 'sub_dept_admin') {
@@ -320,9 +342,11 @@ export const getPendingCustomerApprovals = async (req, res) => {
         conn = await pool.getConnection();
         const [rows] = await conn.query(
             `SELECT dar.id, dar.customer_id, dar.customer_name, dar.created_at,
-                    u.username AS requester_name, u.id AS requester_id
+                    u.username AS requester_name, u.id AS requester_id,
+                    c.phone_no, c.email_id, c.first_name, c.last_name, c.C_unique_id
              FROM delete_approval_requests dar
              JOIN users u ON u.id = dar.requester_id
+             LEFT JOIN customers c ON c.id = dar.customer_id
              WHERE dar.approver_id = ? AND dar.status = 'pending'
              ORDER BY dar.created_at DESC`,
             [req.user.userId]

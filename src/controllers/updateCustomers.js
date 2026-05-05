@@ -233,6 +233,34 @@ export const updateCustomer = async (req, res) => {
         req.user.company_id || customer.company_id
       );
 
+      // If scheduled_at was updated, create/update scheduler entry
+      const scheduledAtLog = updateLogs.find(log => log.field === 'scheduled_at');
+      if (scheduledAtLog && scheduledAtLog.newValue) {
+        // Check if scheduler entry exists for this customer
+        const [existingScheduler] = await connection.execute(
+          'SELECT id FROM scheduler WHERE customer_id = ? AND status = ?',
+          [customerId, 'pending']
+        );
+
+        if (existingScheduler.length > 0) {
+          // Update existing scheduler entry
+          await connection.execute(
+            'UPDATE scheduler SET scheduled_at = ?, updated_at = NOW() WHERE id = ?',
+            [scheduledAtLog.newValue, existingScheduler[0].id]
+          );
+          console.log('Updated scheduler entry:', existingScheduler[0].id);
+        } else {
+          // Create new scheduler entry
+          const companyId = req.user.company_id || customer.company_id;
+          await connection.execute(
+            `INSERT INTO scheduler (customer_id, scheduled_at, created_by, assigned_to, status, company_id, created_at, updated_at)
+             VALUES (?, ?, ?, ?, 'pending', ?, NOW(), NOW())`,
+            [customerId, scheduledAtLog.newValue, req.user.userId, req.user.username, companyId]
+          );
+          console.log('Created new scheduler entry for customer:', customerId);
+        }
+      }
+
       await connection.commit();
 
       res.status(200).json({
