@@ -343,7 +343,7 @@ export const getPendingCustomerApprovals = async (req, res) => {
         const [rows] = await conn.query(
             `SELECT dar.id, dar.customer_id, dar.customer_name, dar.created_at,
                     u.username AS requester_name, u.id AS requester_id,
-                    c.phone_no, c.email_id, c.first_name, c.last_name, c.C_unique_id
+                    c.phone_no, c.first_name, c.C_unique_id
              FROM delete_approval_requests dar
              JOIN users u ON u.id = dar.requester_id
              LEFT JOIN customers c ON c.id = dar.customer_id

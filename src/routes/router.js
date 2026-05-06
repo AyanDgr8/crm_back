@@ -65,6 +65,11 @@ import {
 } from '../controllers/companies.js';
 
 import { addCustomField, getCustomFields, deleteCustomField, reorderCustomFields, editCustomField } from '../controllers/dynamicFields.js';
+import { getDashboardStats } from '../controllers/dashboardController.js';
+import {
+    getAvailableFields, getFieldData,
+    getWidgets, createWidget, updateWidget, deleteWidget, reorderWidgets
+} from '../controllers/dashboardWidgetsController.js';
 import {
     createDepartment, getDepartments, updateDepartment, deleteDepartment,
     createSubDepartment, getSubDepartments, updateSubDepartment, deleteSubDepartment,
@@ -92,6 +97,18 @@ router.use('/', teamRoutes);
 
 
 
+
+// ============================================================================
+// DASHBOARD ROUTES
+// ============================================================================
+router.get('/dashboard/stats',            authenticateToken, getDashboardStats);
+router.get('/dashboard/available-fields', authenticateToken, getAvailableFields);
+router.get('/dashboard/field-data',       authenticateToken, getFieldData);
+router.get('/dashboard/widgets',          authenticateToken, getWidgets);
+router.post('/dashboard/widgets',         authenticateToken, createWidget);
+router.put('/dashboard/widgets/reorder',  authenticateToken, reorderWidgets);
+router.put('/dashboard/widgets/:id',      authenticateToken, updateWidget);
+router.delete('/dashboard/widgets/:id',   authenticateToken, deleteWidget);
 
 // ============================================================================
 // SUPER ADMIN ROUTES - Company Management
